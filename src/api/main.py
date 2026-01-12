@@ -1,22 +1,19 @@
+import os
+import cv2
+import tempfile
 from fastapi import FastAPI, UploadFile, File, Query
 from fastapi.responses import JSONResponse
-import tempfile
-import os
-from typing import Optional
-import cv2
 
-from src.cv.detect import Detector
+from src.cv.detector import detect_on_frame, get_model
 from src.video.sampling import iter_sampled_frames
 
 app = FastAPI(title="Smart Pantry CV API", version="0.1.0")
 
-detector: Optional[Detector] = None
-
 
 @app.on_event("startup")
 def _startup():
-    global detector
-    detector = Detector(model_name=os.getenv("YOLO_MODEL", "yolov8n.pt"))
+    # Preload YOLO model once
+    get_model()
 
 
 @app.get("/health")
@@ -31,8 +28,10 @@ async def detect_video(
     max_frames: int = Query(30, ge=1),
     conf: float = Query(0.25, ge=0.0, le=1.0),
 ):
-    if detector is None:
-        return JSONResponse(status_code=500, content={"ok": False, "error": "detector_not_ready"})
+    try:
+        get_model()
+    except Exception as exc:  # pragma: no cover - defensive guard
+        return JSONResponse(status_code=500, content={"ok": False, "error": "detector_not_ready", "detail": str(exc)})
 
     suffix = os.path.splitext(video.filename or "")[1] or ".mp4"
     tmp_path = None
@@ -44,6 +43,7 @@ async def detect_video(
 
         labels = []
         counts: dict[str, int] = {}
+        detections_by_frame: list[list[dict]] = []
         sampled = 0
 
         cap = cv2.VideoCapture(tmp_path)
@@ -61,9 +61,12 @@ async def detect_video(
         frames = iter_sampled_frames(tmp_path, sample_fps=sample_fps, max_frames=max_frames)
         for frame_bgr in frames:
             sampled += 1
-            frame_labels = detector.detect(frame_bgr, conf=conf)
-            for lab in frame_labels:
-                counts[lab] = counts.get(lab, 0) + 1
+            frame_detections = detect_on_frame(frame_bgr, conf=conf)
+            detections_by_frame.append(frame_detections)
+
+            for det in frame_detections:
+                label = str(det.get("label", ""))
+                counts[label] = counts.get(label, 0) + 1
 
         labels = sorted(counts.keys())
         return {
@@ -71,6 +74,7 @@ async def detect_video(
             "labels": labels,
             "unique_labels": labels,
             "frame_hits": counts,
+            "detections": detections_by_frame,
             "sampled_frames": sampled,
             "sample_fps": sample_fps,
             "every_n_frames": every_n_frames,
