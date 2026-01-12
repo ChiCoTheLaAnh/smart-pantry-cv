@@ -3,9 +3,10 @@ from fastapi.responses import JSONResponse
 import tempfile
 import os
 from typing import Optional
+import cv2
 
 from src.cv.detect import Detector
-from src.cv.video import iter_sampled_frames
+from src.video.sampling import iter_sampled_frames
 
 app = FastAPI(title="Smart Pantry CV API", version="0.1.0")
 
@@ -45,9 +46,22 @@ async def detect_video(
         counts: dict[str, int] = {}
         sampled = 0
 
-        for frame in iter_sampled_frames(tmp_path, every_n_frames=every_n_frames, max_frames=max_frames):
+        cap = cv2.VideoCapture(tmp_path)
+        try:
+            fps = cap.get(cv2.CAP_PROP_FPS)
+            fps = float(fps) if fps and fps > 0 else None
+        finally:
+            cap.release()
+
+        if fps:
+            sample_fps = fps / float(every_n_frames)
+        else:
+            sample_fps = 1.0
+
+        frames = iter_sampled_frames(tmp_path, sample_fps=sample_fps, max_frames=max_frames)
+        for frame_bgr in frames:
             sampled += 1
-            frame_labels = detector.detect(frame, conf=conf)
+            frame_labels = detector.detect(frame_bgr, conf=conf)
             for lab in frame_labels:
                 counts[lab] = counts.get(lab, 0) + 1
 
@@ -58,6 +72,7 @@ async def detect_video(
             "unique_labels": labels,
             "frame_hits": counts,
             "sampled_frames": sampled,
+            "sample_fps": sample_fps,
             "every_n_frames": every_n_frames,
             "max_frames": max_frames,
             "conf": conf,
